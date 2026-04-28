@@ -1,18 +1,20 @@
 import { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
-import { FileUp, FileText, Loader2, Send, Trash2, ChevronDown, ChevronUp, Zap } from 'lucide-react';
+import { FileUp, FileText, Loader2, Send, Trash2, ChevronDown, ChevronUp, Zap, Eraser, AlertCircle, Shield, MessageSquare, Sparkles } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
 import './App.css';
 
-// Sub-component to render individual chat bubbles and handle their own accordion state
 const ChatMessage = ({ msg }) => {
   const [showSources, setShowSources] = useState(false);
   const isUser = msg.sender === 'user';
 
   return (
     <div className={`chat-bubble ${isUser ? 'user' : 'ai'}`}>
-      <div>{msg.text}</div>
       
-      {/* Enterprise Auditability: Confidence Score & Sources */}
+      <div className="markdown-content">
+        <ReactMarkdown>{msg.text}</ReactMarkdown>
+      </div>
+      
       {!isUser && msg.confidenceScore > 0 && (
         <div style={{ borderTop: '1px solid #e2e8f0', marginTop: '0.75rem', paddingTop: '0.5rem' }}>
           <div className="confidence-badge">
@@ -45,32 +47,46 @@ const ChatMessage = ({ msg }) => {
 };
 
 function App() {
-  // Global State
-  const [documents, setDocuments] = useState([]); // Array of {id, name, time}
+  const [documents, setDocuments] = useState([]); 
   const [activeDocumentId, setActiveDocumentId] = useState(null);
   const [activeTab, setActiveTab] = useState('summary');
-  const [loading, setLoading] = useState(false);
   
-  // Data Maps (Stored by documentId)
+  // Decoupled loading states for better UX
+  const [loading, setLoading] = useState(false);
+  const [isUploading, setIsUploading] = useState(false); // NEW
+  
   const [summaries, setSummaries] = useState({});
   const [chatHistories, setChatHistories] = useState({}); 
   
-  // Input State
   const [file, setFile] = useState(null);
+  const [fileError, setFileError] = useState(''); 
   const [question, setQuestion] = useState('');
   
-  // Auto-scroll ref for chat
   const chatEndRef = useRef(null);
 
-  // Auto-scroll to bottom of chat when new messages arrive
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [chatHistories, activeDocumentId]);
 
-  // 1. Handle File Upload
+  const handleFileChange = (e) => {
+    const selectedFile = e.target.files[0];
+    setFileError(''); 
+    
+    if (selectedFile) {
+      if (selectedFile.type !== 'application/pdf') {
+        setFileError('Invalid file type. Please upload a PDF document.');
+        setFile(null);
+        e.target.value = null; 
+      } else {
+        setFile(selectedFile);
+      }
+    }
+  };
+
   const handleUpload = async () => {
     if (!file) return;
-    setLoading(true);
+    setIsUploading(true); // Trigger the skeleton loader
+    
     const formData = new FormData();
     formData.append('file', file);
 
@@ -78,43 +94,39 @@ function App() {
       const response = await axios.post('https://docuquery-api-idh9.onrender.com/api/documents/upload', formData);
       const newDocId = response.data.documentId;
       
-      // Add to document library array
+      const now = new Date();
+      const dateStr = now.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+      const timeStr = now.toLocaleTimeString(undefined, { hour: '2-digit', minute:'2-digit' });
+      
       setDocuments([{
         id: newDocId,
         name: file.name,
-        time: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})
+        time: `${dateStr}, ${timeStr}` 
       }, ...documents]);
       
-      // Set as active
       setActiveDocumentId(newDocId);
-      setFile(null); // Clear input
-      
-      // Initialize empty chat history for this doc
+      setActiveTab('summary'); // Auto-switch to summary on new upload
+      setFile(null); 
       setChatHistories(prev => ({...prev, [newDocId]: []}));
       
     } catch (error) {
       alert("Upload failed: " + (error.response?.data?.message || error.message));
     } finally {
-      setLoading(false);
+      setIsUploading(false); // Remove skeleton loader
     }
   };
 
-  // 2. Handle Document Deletion
   const handleDelete = async (e, idToDelete) => {
-    e.stopPropagation(); // Prevent clicking the row
+    e.stopPropagation(); 
     if (!window.confirm("Are you sure you want to delete this document from the AI memory?")) return;
     
     try {
       await axios.delete(`https://docuquery-api-idh9.onrender.com/api/documents/${idToDelete}`);
-      
-      // Remove from library
       setDocuments(documents.filter(doc => doc.id !== idToDelete));
       
-      // Clean up maps
       const newSummaries = {...summaries}; delete newSummaries[idToDelete]; setSummaries(newSummaries);
       const newChats = {...chatHistories}; delete newChats[idToDelete]; setChatHistories(newChats);
       
-      // Reset active view if we deleted the currently viewed doc
       if (activeDocumentId === idToDelete) {
         setActiveDocumentId(documents.length > 1 ? documents.find(d => d.id !== idToDelete).id : null);
       }
@@ -123,13 +135,11 @@ function App() {
     }
   };
 
-  // 3. Handle Fetching Summary
   const handleGetSummary = async () => {
     if (!activeDocumentId) return;
     setLoading(true);
     try {
       const response = await axios.get(`https://docuquery-api-idh9.onrender.com/api/documents/${activeDocumentId}/summary`);
-      // Save summary mapped to this document ID
       setSummaries(prev => ({...prev, [activeDocumentId]: response.data}));
     } catch (error) {
       alert("Failed to get summary: " + (error.response?.data?.message || error.message));
@@ -138,58 +148,112 @@ function App() {
     }
   };
 
-  // 4. Handle Asking a Question
   const handleAskQuestion = async () => {
     if (!activeDocumentId || !question.trim()) return;
     
     const userQ = question;
-    setQuestion(''); // Clear input instantly for better UX
+    setQuestion(''); 
     
-    // Append user question to local chat UI instantly
     const newChatMsg = { sender: 'user', text: userQ };
+    const aiPlaceholder = { sender: 'ai', text: '', confidenceScore: 0, sources: [] };
+
     setChatHistories(prev => ({
       ...prev,
-      [activeDocumentId]: [...(prev[activeDocumentId] || []), newChatMsg]
+      [activeDocumentId]: [...(prev[activeDocumentId] || []), newChatMsg, aiPlaceholder]
     }));
 
     setLoading(true);
     try {
-      const response = await axios.post(`https://docuquery-api-idh9.onrender.com/api/documents/${activeDocumentId}/query`, {
-        question: userQ
+      const response = await fetch(`https://docuquery-api-idh9.onrender.com/api/documents/${activeDocumentId}/query`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: userQ })
       });
-      
-      // Append AI response with Auditability metrics
-      const aiResponseMsg = { 
-        sender: 'ai', 
-        text: response.data.answer,
-        confidenceScore: response.data.confidenceScore,
-        sources: response.data.sourceSnippets
-      };
-      
-      setChatHistories(prev => ({
-        ...prev,
-        [activeDocumentId]: [...(prev[activeDocumentId] || []), aiResponseMsg]
-      }));
 
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.message || 'Server error');
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        let boundary = buffer.indexOf('\n\n');
+
+        while (boundary !== -1) {
+          const message = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+
+          if (message.startsWith('data:')) {
+            const dataStr = message.substring(5).trim();
+            if (dataStr) {
+              const data = JSON.parse(dataStr);
+
+              if (data.type === 'metadata') {
+                setChatHistories(prev => {
+                  const current = prev[activeDocumentId];
+                  const updated = [...current];
+                  updated[updated.length - 1] = {
+                    ...updated[updated.length - 1],
+                    confidenceScore: data.score,
+                    sources: data.sources
+                  };
+                  return { ...prev, [activeDocumentId]: updated };
+                });
+              } 
+              else if (data.type === 'token') {
+                setChatHistories(prev => {
+                  const current = prev[activeDocumentId];
+                  const updated = [...current];
+                  updated[updated.length - 1] = {
+                    ...updated[updated.length - 1],
+                    text: updated[updated.length - 1].text + data.content
+                  };
+                  return { ...prev, [activeDocumentId]: updated };
+                });
+              } 
+              else if (data.type === 'complete') {
+                setLoading(false); 
+              }
+            }
+          }
+          boundary = buffer.indexOf('\n\n');
+        }
+      }
     } catch (error) {
-      alert("Query failed: " + (error.response?.data?.message || error.message));
-      // Remove the optimistic user message if it failed
+      alert("Query failed: " + error.message);
       setChatHistories(prev => ({
         ...prev,
-        [activeDocumentId]: prev[activeDocumentId].slice(0, -1)
+        [activeDocumentId]: prev[activeDocumentId].slice(0, -2)
       }));
     } finally {
       setLoading(false);
     }
   };
 
-  // Get active data based on selected tab
+  const handleResetChat = async () => {
+    if (!activeDocumentId) return;
+    if (!window.confirm("Are you sure you want to clear the conversation history for this document?")) return;
+
+    try {
+      await axios.delete(`https://docuquery-api-idh9.onrender.com/api/documents/${activeDocumentId}/chat/reset`);
+      setChatHistories(prev => ({ ...prev, [activeDocumentId]: [] }));
+    } catch (error) {
+      alert("Failed to reset chat: " + (error.response?.data?.message || error.message));
+    }
+  };
+
   const activeSummary = summaries[activeDocumentId];
   const activeChat = chatHistories[activeDocumentId] || [];
 
   return (
     <div className="app-container">
-      {/* LEFT PANEL: INGESTION & LIBRARY */}
       <div className="left-panel">
         <div className="header-title">
           <FileText color="#2563eb" /> DocuQuery AI
@@ -199,16 +263,22 @@ function App() {
           <input 
             type="file" 
             accept=".pdf"
-            onChange={(e) => setFile(e.target.files[0])} 
+            onChange={handleFileChange} 
             style={{marginBottom: '1rem', width: '100%'}}
           />
-          <button className="btn" onClick={handleUpload} disabled={!file || loading}>
-            {loading && !activeDocumentId ? <Loader2 className="lucide-spin" /> : <FileUp />}
-            Upload & Process
+          
+          {fileError && (
+            <div style={{ color: '#ef4444', fontSize: '0.8rem', marginBottom: '1rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.25rem' }}>
+              <AlertCircle size={14} /> {fileError}
+            </div>
+          )}
+
+          <button className="btn" onClick={handleUpload} disabled={!file || fileError || isUploading}>
+            {isUploading ? <Loader2 className="lucide-spin" /> : <FileUp />}
+            {isUploading ? "Extracting Vectors..." : "Upload & Process"}
           </button>
         </div>
 
-        {/* The Document Library */}
         {documents.length > 0 && (
           <>
             <div className="doc-list-header">Active Memory ({documents.length}/5)</div>
@@ -221,7 +291,10 @@ function App() {
                 >
                   <div className="doc-info">
                     <span className="doc-name">{doc.name}</span>
-                    <span className="doc-time">Ingested: {doc.time}</span>
+                    <span className="doc-time">
+                      <span style={{color: '#94a3b8', fontSize: '0.65rem'}}>#{doc.id.substring(0,6)} </span>
+                      {doc.time}
+                    </span>
                   </div>
                   <button 
                     className="delete-btn" 
@@ -237,31 +310,73 @@ function App() {
         )}
       </div>
 
-      {/* RIGHT PANEL: INTELLIGENCE */}
       <div className="right-panel">
         <div className="tabs">
           <div 
-            className={`tab ${activeTab === 'summary' ? 'active' : ''}`}
+            className={`tab ${(activeTab === 'summary' && (activeDocumentId || isUploading)) ? 'active' : ''}`}
             onClick={() => setActiveTab('summary')}
+            style={{ pointerEvents: (activeDocumentId || isUploading) ? 'auto' : 'none' }}
           >
             Structured Output
           </div>
           <div 
-            className={`tab ${activeTab === 'chat' ? 'active' : ''}`}
+            className={`tab ${(activeTab === 'chat' && (activeDocumentId || isUploading)) ? 'active' : ''}`}
             onClick={() => setActiveTab('chat')}
+            style={{ pointerEvents: (activeDocumentId || isUploading) ? 'auto' : 'none' }}
           >
             RAG Assistant
           </div>
         </div>
 
         <div className="content-card">
-          {!activeDocumentId ? (
-            <div style={{color: '#94a3b8', textAlign: 'center', margin: 'auto'}}>
-              Please upload or select a document from the library.
+          
+          {/* NEW: 1. Loading Skeleton View */}
+          {isUploading ? (
+            <div className="skeleton-container">
+              <div className="skeleton-header"></div>
+              <div className="skeleton-block">
+                <div className="skeleton-line"></div>
+                <div className="skeleton-line"></div>
+                <div className="skeleton-line short"></div>
+              </div>
+              <div className="skeleton-header" style={{width: '25%', marginTop: '1rem'}}></div>
+              <div className="skeleton-block">
+                <div className="skeleton-line"></div>
+                <div className="skeleton-line short"></div>
+              </div>
+              <div style={{textAlign: 'center', color: '#94a3b8', marginTop: 'auto', fontSize: '0.875rem'}}>
+                <Loader2 className="lucide-spin" size={16} style={{display: 'inline', marginRight: '0.5rem', verticalAlign: 'text-bottom'}} />
+                Parsing PDF and Generating Embeddings...
+              </div>
+            </div>
+          ) : 
+          
+          /* NEW: 2. Landing State View */
+          !activeDocumentId ? (
+            <div className="landing-state">
+              <Sparkles size={48} color="#2563eb" style={{marginBottom: '1rem', opacity: 0.8}} />
+              <h2>Enterprise Document Intelligence</h2>
+              <p>Upload a PDF to instantly extract structured metadata and engage in context-aware, fully auditable conversations.</p>
+              
+              <ul className="feature-list">
+                <li className="feature-item">
+                  <Zap color="#2563eb" size={20}/>
+                  <span><strong>Instant Extraction:</strong> Converts unstructured text into precise JSON metadata.</span>
+                </li>
+                <li className="feature-item">
+                  <MessageSquare color="#2563eb" size={20}/>
+                  <span><strong>Stateful Memory:</strong> Context-aware RAG chat supporting multi-turn conversations.</span>
+                </li>
+                <li className="feature-item">
+                  <Shield color="#2563eb" size={20}/>
+                  <span><strong>Zero Hallucinations:</strong> Every answer is backed by a vector confidence score and raw source text.</span>
+                </li>
+              </ul>
             </div>
           ) : (
+            
+            /* 3. Normal Active Content View */
             <>
-              {/* SUMMARY TAB */}
               {activeTab === 'summary' && (
                 <div style={{overflowY: 'auto', paddingRight: '1rem'}}>
                   <button className="btn" onClick={handleGetSummary} disabled={loading} style={{width: 'auto'}}>
@@ -288,9 +403,19 @@ function App() {
                 </div>
               )}
 
-              {/* CHAT TAB */}
               {activeTab === 'chat' && (
                 <div className="chat-container">
+                  {activeChat.length > 0 && (
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '0.5rem' }}>
+                      <button 
+                        onClick={handleResetChat}
+                        style={{ background: 'none', border: 'none', color: '#ef4444', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.8rem', fontWeight: '600' }}
+                      >
+                        <Eraser size={14} /> Clear Chat
+                      </button>
+                    </div>
+                  )}
+
                   <div className="chat-history">
                     {activeChat.length === 0 ? (
                       <div style={{color: '#94a3b8', textAlign: 'center', marginTop: '2rem'}}>
@@ -299,7 +424,7 @@ function App() {
                     ) : (
                       activeChat.map((msg, idx) => <ChatMessage key={idx} msg={msg} />)
                     )}
-                    <div ref={chatEndRef} /> {/* Auto-scroll target */}
+                    <div ref={chatEndRef} /> 
                   </div>
 
                   <div className="chat-input-group">
